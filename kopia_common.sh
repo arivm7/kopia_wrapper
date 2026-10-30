@@ -17,17 +17,14 @@ set -uo pipefail
 # ---- Версия проекта скриптов -------------------------------------------------
 # Используется ключом -v/--version в kopia_backup.sh и kopia_restore_to.sh.
 # Меняйте при значимых изменениях логики скриптов.
-APP_VERSION="1.1.0 (2026-07-12)"
+APP_VERSION="2.0.0 (2026-10-30)"
 COPYRIGHT="Copyright (C) 2026 Ariv <ariv@meta.ua> | https://github.com/arivm7 | RI-Network, Kiev, UK"
 LAST_CHANGES="\
+v2.0.0 (2026-10-30): добавлен restore-kit для восстановления данных из архива на другой машине
+                     kopia_restore_to.sh полностью переписан с новым функционалом.
 v1.1.0 (2026-07-12): Добавлен просмотр информации об архиве (-i/--info) в
-                     kopia_restore_to.sh (дата последнего снапшота, размер
-                     данных, список верхнего уровня); унифицирован
-                     конфиг-файл обёртки (общий для backup и restore);
-                     вывод пути к репозиторию и конфигам при запуске;
+                     унифицирован конфиг-файл обёртки (общий для backup и restore);
                      добавлено автодополнение bash для обоих скриптов;
-                     в инсталляторе — значение по умолчанию и явная отмена
-                     (q) в меню выбора папки и при подтверждении перезаписи.
 v1.0.0 (2026-07-01): Базовый функционал резервного копирования и восстановления
 "
 
@@ -82,8 +79,8 @@ REPO_PATH="${REAL_HOME}/Backups/kopia_backup/$(hostname --short)"
 
 
 # KOPIA_CONFIG — путь к файлу конфигурации подключения kopia.
-KOPIA_CONFIG="${CONFIG_PATH}/repository.config"
-
+KOPIA_CONFIG_FILENAME="repository.config"
+KOPIA_CONFIG="${CONFIG_PATH}/${KOPIA_CONFIG_FILENAME}"
 
 
 #
@@ -95,6 +92,17 @@ KOPIA_PASSWORD_FILE="${CONFIG_PATH}/.kopia_pass"
 
 
 #
+# Файл со списком путей, которые бэкапятся (генерируется из SOURCE_PATHS
+# функцией write_source_paths_file). Используется:
+#   - как источник для source_paths.txt в restore-kit (см. RESTORE_KIT_FILES);
+#   - в kopia_restore_to.sh --info без аргумента (если restore-kit найден).
+# Формат: один путь на строку, строки с '#' игнорируются.
+#
+KOPIA_PATHS_FILE="${CONFIG_PATH}/source_paths.txt"
+
+
+
+#
 # ---- Целевая папка восстановления по умолчанию ------------------------------
 # Каждый запуск без явного пути создаёт новую подпапку с меткой времени.
 RESTORE_ROOT_DEFAULT="${REAL_HOME}/Backups/kopia_restore/$(date +%Y%m%d_%H%M%S)"
@@ -102,7 +110,42 @@ RESTORE_ROOT_DEFAULT="${REAL_HOME}/Backups/kopia_restore/$(date +%Y%m%d_%H%M%S)"
 
 
 #
+# Куда класть restore-kit (параметры для восстановления на другом ПК/сервере). См. RESTORE_KIT_MODE ниже.
+#
+KIT_MODE_IN="in"            #   "in"    — $REPO_PATH/restore_kit/    (по умолчанию, всё в одном месте)
+KIT_MODE_OUT="out"          #   "out"   — ${REPO_PATH}.restore-kit/  (рядом, но отдельно — можно увезти на другой носитель)
+KIT_MODE_NONE="none"        #   "none"  — не сохранять конфиг/пароль рядом с архивом
+
+#
+#   KIT_MODE фактически используемый при создании бакапа
+#
+RESTORE_KIT_MODE="${KIT_MODE_IN}"   
+
+#
+#   Имя папки для restore-kit вместе с репозиторием
+#   для KIT_MODE_IN -- это имя папки внутри папки бакапа
+#   для KIT_MODE_OUT -- это имя суфикса папки рядом с папкой бакапа
+#
+RESTORE_KIT_DIR_NAME="restore_kit"
+
+#
+# Список файлов, входящик в restore-kit. См. write_restore_kit() ниже.
+#
+# ВНИМАНИЕ: элементы массива раскрываются при source конфига,
+# поэтому CONFIG_PATH/KOPIA_* должны быть определены ВЫШЕ этого блока
+# (они определены в начале kopia_common.sh до секции CONFIG).
+RESTORE_KIT_FILES=(
+    "${KOPIA_PASSWORD_FILE}"
+    "${KOPIA_CONFIG}"
+    "${CONFIG_PATH}/repository.config.kopia-password"
+    "${KOPIA_PATHS_FILE}"
+)
+
+
+
+#
 # ---- Список каталогов и файлов, входящих в резервную копию ------------------
+#
 # Обратите внимание: список содержит и каталоги, и отдельные файлы —
 # kopia одинаково умеет бэкапить оба типа.
 SOURCE_PATHS=(
@@ -186,8 +229,18 @@ exit_with_msg() {
         msg="[${COLOR_OK}Ok${COLOR_OFF}] ${msg}"
         ;;
     *)
+        if [[ -z "${num}" ]]; then
+            i="info"
+        else
+            i="${num}"
+        fi
+
+        if ! [[ "${num}" =~ ^[0-9]+$ ]]; then
+            num=0
+        fi
+
         log_info "${msg}"
-        msg="[${COLOR_INFO}i${COLOR_OFF}] ${msg}"
+        msg="[${COLOR_INFO}${i}${COLOR_OFF}] ${msg}"
         ;;
     esac
     echo -e "${msg}"
@@ -210,8 +263,17 @@ save_config_file()
     fi
     # Извлечь фрагмент между маркерами CONFIG START и CONFIG END из самого скрипта
     "${APP_AWK}" '/\[[[:space:]]*CONFIG START[[:space:]]*\]/,/\[[[:space:]]*CONFIG END[[:space:]]*\]/' "${BASH_SOURCE[0]}" > "${CONFIG_FILE}"
+    echo ""
+local msg
+msg=$(cat <<EOF
 
-    exit_with_msg "Конфиг-файл '${COLOR_FILENAME}${CONFIG_FILE}${COLOR_OFF}' создан. Отредактируйте его при необходимости и запустите скрипт заново." 0
+=======================================================================
+  Конфиг-файл ${COLOR_FILENAME}${CONFIG_FILE}${COLOR_OFF} создан. 
+  Отредактируйте его, при необходимости, и запустите скрипт заново.
+=======================================================================\n
+EOF
+)
+    exit_with_msg "${msg}" ii
 }
 
 
@@ -228,6 +290,324 @@ read_config_file()
     else
         save_config_file
     fi
+}
+
+
+
+#
+# write_source_paths_file
+#
+#   Обновляет ${KOPIA_PATHS_FILE} (${CONFIG_PATH}/source_paths.txt)
+#   из текущего массива SOURCE_PATHS.
+#
+#   Перезаписывает ТОЛЬКО если массив изменился (сравнение через
+#   read_source_paths_file — см. ниже). Это тот самый принцип
+#   «не делать лишних записей»: при обычном запуске файл не трогается.
+#
+#   Запись атомарная (tmp + mv), как и всё остальное.
+#
+write_source_paths_file() {
+    local paths_file="${KOPIA_PATHS_FILE:?write_source_paths_file: KOPIA_PATHS_FILE не определён}"
+    local need_update="no"
+
+    if [[ ! -f "$paths_file" ]]; then
+        need_update="yes"
+    elif read_source_paths_file "$paths_file"; then
+        if (( ${#SOURCE_PATHS_FROM_FILE[@]} != ${#SOURCE_PATHS[@]} )); then
+            need_update="yes"
+        else
+            local i
+            for i in "${!SOURCE_PATHS[@]}"; do
+                if [[ "${SOURCE_PATHS_FROM_FILE[$i]}" != "${SOURCE_PATHS[$i]}" ]]; then
+                    need_update="yes"
+                    break
+                fi
+            done
+        fi
+    else
+        need_update="yes"
+    fi
+
+    if [[ "$need_update" != "yes" ]]; then
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$paths_file")"
+
+    local tmp
+    tmp="$(mktemp "${paths_file}.tmp.XXXXXX")" || \
+        exit_with_msg "source_paths: не удалось создать временный файл для ${paths_file}" 1
+
+    {
+        printf '# Список путей, которые бэкапятся.\n'
+        printf '# Формат: один путь на строку. Строки, начинающиеся с #, игнорируются.\n'
+        printf '# Генерируется автоматически из SOURCE_PATHS; перезаписывается при изменении списка.\n'
+        printf '%s\n' "${SOURCE_PATHS[@]}"
+    } > "$tmp"
+
+    chmod 644 "$tmp"
+    mv -f "$tmp" "$paths_file" || {
+        rm -f "$tmp"
+        exit_with_msg "source_paths: не удалось атомарно заменить ${paths_file}" 1
+    }
+    echo "source_paths: обновлён ${paths_file}"
+}
+
+
+
+#
+# Глобальная переменная для хранения путей из source_paths.txt 
+# (см. read_source_paths_file)
+#
+SOURCE_PATHS_FROM_FILE=()  
+
+#
+# read_source_paths_file "<путь к source_paths.txt>"
+#
+#   Читает source_paths.txt и возвращает массив путей через глобальную
+#   переменную SOURCE_PATHS_FROM_FILE.
+#
+#   Формат файла: один путь на строку. Пустые строки и строки,
+#   начинающиеся с '#' (с возможными ведущими пробелами), игнорируются.
+#   Пробелы вокруг пути НЕ обрезаются — путь в Linux может содержать
+#   пробелы, и обрезать их значило бы испортить такой путь.
+#
+#   Возвращает:
+#     0 — файл прочитан (массив может быть пустым, если в файле только
+#         комментарии/пустые строки);
+#     1 — файл не существует или не читается.
+#
+#   Результат — в SOURCE_PATHS_FROM_FILE (глобальная, не local),
+#   потому что bash не умеет возвращать массивы из функций иначе как
+#   через глобальную переменную или nameref (nameref требует bash 4.3+,
+#   а совместимость с более старым bash не нужна, но и усложнять
+#   сигнатуру не хочется).
+#
+read_source_paths_file() {
+    local file="${1:?read_source_paths_file: не передан путь к файлу}"
+
+    [[ -f "$file" ]] || return 1
+
+    # Читаем непустые строки, игнорируя комментарии.
+    # Процесс-подстановка < <(...) не влияет на код возврата mapfile,
+    # поэтому если grep ничего не найдёт (файл из одних комментариев) —
+    # массив просто останется пустым, и функция вернёт 0 (файл прочитан).
+    mapfile -t SOURCE_PATHS_FROM_FILE < <(
+        grep -v '^[[:space:]]*#' "$file" 2>/dev/null \
+            | grep -v '^[[:space:]]*$'
+    )
+
+    return 0
+}
+
+
+
+#
+# Атомарное копирование файла: запись во временный файл в том же каталоге
+# + chmod + rename. Гарантирует, что при сбое питания/сигнале целевой
+# файл останется либо старым (валидным), либо новым (валидным), но
+# никогда — пустым или частично записанным.
+#
+# $1 — источник
+# $2 — назначение
+# $3 — права (например, 600)
+#
+_atomic_copy() {
+    local src="$1" dst="$2" mode="$3"
+    local tmp
+    tmp="$(mktemp "${dst}.tmp.XXXXXX")" || return 1
+    if ! cp -f "$src" "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    chmod "$mode" "$tmp" || { rm -f "$tmp"; return 1; }
+    mv -f "$tmp" "$dst" || { rm -f "$tmp"; return 1; }
+    return 0
+}
+
+
+
+#
+# Читает первую строку README.txt и извлекает из неё версию restore-kit.
+#
+# Ожидаемый формат первой строки (формируется в write_restore_kit):
+#     # v<APP_VERSION>
+# например:
+#     # v1.1.0 (2026-07-12)
+#
+# Разбор по конвейеру:
+#
+#   head -n1 "$readme"
+#       Берёт только первую строку файла. Именно первая строка —
+#       машиночитаемый маркер версии; остальной текст README
+#       (описание, инструкция) для парсинга не важен и не читается.
+#       2>/dev/null — подавляет сообщение об ошибке, если файл
+#       внезапно исчез между проверкой [[ -f ]] и вызовом head
+#       (гонка с другим процессом); в этом случае конвейер просто
+#       выдаст пустую строку, и вызывающая сторона воспримет это
+#       как «версия неизвестна» — безопасный дефолт (README будет
+#       перезаписан при следующем успешном запуске).
+#
+#   tr -d '\r'
+#       Удаляет символы возврата каретки (CR, 0x0D). Нужно на случай,
+#       если README.txt по какой-то причине оказался с переводами строк
+#       в формате CRLF (Windows): например, файл отредактировали в
+#       Windows-редакторе и сохранили, или скопировали через SMB-шару
+#       с неудачной настройкой. Без этого '\r' остался бы в конце
+#       извлечённой версии, и побайтовое сравнение с APP_VERSION
+#       (где нет '\r') не совпало бы — README перезаписывался бы
+#       при каждом запуске, хотя версия фактически та же.
+#       На Linux-файлах с LF этот шаг — no-op (не меняет ничего),
+#       так что цена его нулевая.
+#
+#   sed -n 's/^# v//p'
+#       Извлекает версию:
+#         -n        — не печатать строки по умолчанию (только по команде p);
+#         s/^# v//  — если строка начинается с "# v", заменить этот
+#                     префикс на пустоту (то есть отрезать его);
+#         p         — напечатать строку, если замена произошла.
+#       Если первая строка не начинается с "# v" (старый формат README,
+#       ручная правка, повреждённый файл), sed ничего не напечатает —
+#       функция вернёт пустую строку. Вызывающая сторона сравнит её
+#       с APP_VERSION, получит неравенство и перезапишет README
+#       в правильном формате. То есть «не распознали» трактуется
+#       как «обновить», а не «оставить как есть» — это осознанный
+#       выбор в пользу актуальности.
+#
+# Возвращаемое значение: версия без префикса "# v" (например,
+# "1.1.0 (2026-07-12)") либо пустая строка, если файла нет,
+# первая строка пуста или формат не распознан.
+#
+_kit_readme_version_read() {
+    local readme="$1"
+    [[ -f "$readme" ]] || { echo ""; return; }
+    head -n1 "$readme" 2>/dev/null | tr -d '\r' | sed -n 's/^# v//p'
+}
+
+
+
+write_restore_kit()
+{
+    local repo_path="${1:?write_restore_kit: не передан путь к репозиторию}"
+    local mode="${RESTORE_KIT_MODE:-${KIT_MODE_IN}}"
+    local kit_dir one_file one_file_name
+
+    if   [[ "$mode" == "$KIT_MODE_IN"  ]]; then
+        kit_dir="${repo_path}/${RESTORE_KIT_DIR_NAME}"
+    elif [[ "$mode" == "$KIT_MODE_OUT" ]]; then
+        kit_dir="${repo_path}.${RESTORE_KIT_DIR_NAME}"
+    elif [[ "$mode" == "$KIT_MODE_NONE" ]]; then
+        echo "restore-kit: не используется (RESTORE_KIT_MODE=${KIT_MODE_NONE})"
+        return 0
+    else
+        exit_with_msg "Неизвестный RESTORE_KIT_MODE='$mode' (ожидается ${KIT_MODE_IN}|${KIT_MODE_OUT}|${KIT_MODE_NONE})" 1
+    fi
+
+    mkdir -p "$kit_dir"
+    chmod 700 "$kit_dir"
+
+    #
+    # Файлы из RESTORE_KIT_FILES (пароль, config...) проверяются через cmp -s
+    # при КАЖДОМ запуске — пароль может смениться без смены версии скрипта,
+    # и это надо поймать. Замена — атомарная (tmp + mv): при сбое питания
+    # целевой файл останется либо старым (валидным), либо новым (валидным),
+    # но никогда — пустым или частично записанным.
+    #
+    for one_file in "${RESTORE_KIT_FILES[@]}"; do
+        one_file_name="${one_file##*/}"
+        if [[ ! -f "$one_file" ]]; then
+            exit_with_msg "restore-kit: обязательный файл не найден — ${one_file}. Restore-kit неполон, восстановление будет невозможно." 1
+        fi
+
+        if cmp -s "$one_file" "$kit_dir/${one_file_name}"; then
+            continue
+        fi
+
+        if ! _atomic_copy "$one_file" "$kit_dir/${one_file_name}" 600; then
+            exit_with_msg "restore-kit: не удалось атомарно скопировать ${one_file} -> ${kit_dir}/${one_file_name}" 1
+        fi
+        echo "restore-kit: обновлён ${one_file_name}"
+    done
+
+    #
+    # README.txt перезаписывается только если его версия (первая строка
+    # "# v<APP_VERSION>") не совпадает с APP_VERSION. Версия хранится
+    # В САМОМ README — согласованность версии и текста гарантирована
+    # (один файл, одна атомарная замена). Первая строка формируется
+    # ровно из APP_VERSION, поэтому сравнение — побайтовое.
+    #
+    local readme_path="${kit_dir}/README.txt"
+    local readme_version
+    readme_version="$(_kit_readme_version_read "$readme_path")"
+
+    if [[ "$readme_version" != "$APP_VERSION" ]]; then
+        local readme_tmp
+        readme_tmp="$(mktemp "${kit_dir}/README.txt.tmp.XXXXXX")" || \
+            exit_with_msg "restore-kit: не удалось создать временный файл для README.txt" 1
+
+        {
+            printf '# v%s\n' "$APP_VERSION"
+            cat <<'EOF'
+restore-kit для репозитория kopia
+=================================
+
+Не редактируйте этот файл вручную — он генерируется автоматически
+и перезаписывается при обновлении скриптов (при смене версии).
+
+Эта папка содержит всё, что нужно для восстановления данных из
+репозитория kopia на другой машине:
+
+  repository.config                  — файл подключения к репозиторию
+  repository.config.kopia-password   — пароль репозитория (base64-обфускация)
+  .kopia_pass                        — тот же пароль в открытом виде
+                                       (используется скриптом kopia_restore_to.sh)
+
+ВНИМАНИЕ: любой, кто получил доступ к этой папке, получает полный доступ
+к данным репозитория. Храните её так же тщательно, как сами данные.
+Файл .kopia_pass содержит пароль в ОТКРЫТОМ виде, .kopia-password —
+в base64-обфускации (это НЕ шифрование).
+
+Все перечисленные файлы обязательны: без любого из них восстановление
+на другой машине невозможно (скрипты работают из cron, интерактивного
+ввода пароля не предусмотрено).
+
+Как восстановить
+----------------
+1. Установите kopia на новой машине (https://kopia.io/docs/installation/).
+2. Скопируйте репозиторий на новую машину (или смонтируйте носитель).
+3. Восстановите с помощью скрипта kopia_restore_to.sh:
+
+     kopia_restore_to.sh --repo /путь/к/репозиторию /путь/для/восстановления
+
+   Скрипт сам найдёт restore_kit внутри репозитория и подключится.
+
+   Если restore-kit лежит отдельно (mode=out):
+
+     kopia_restore_to.sh \
+         --repo /путь/к/репозиторию \
+         --config-from /путь/к/репозиторию.restore_kit \
+         /путь/для/восстановления
+
+4. Либо вручную, без скрипта:
+
+     kopia repository connect filesystem \
+         --path /путь/к/репозиторию \
+         --config-file /путь/к/restore_kit/repository.config
+     kopia snapshot list
+     kopia snapshot restore <ID> /путь/для/восстановления
+
+EOF
+        } > "$readme_tmp"
+
+        chmod 644 "$readme_tmp"
+        mv -f "$readme_tmp" "$kit_dir/README.txt" || {
+            rm -f "$readme_tmp"
+            exit_with_msg "restore-kit: не удалось атомарно заменить README.txt" 1
+        }
+        echo "restore-kit: README.txt обновлён (версия ${APP_VERSION})"
+    fi
+
+    echo "restore-kit записан: ${kit_dir}"
 }
 
 

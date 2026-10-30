@@ -34,9 +34,22 @@ source "${APP_DIR}/kopia_common.sh"
 
 
 # ---- Список файлов проекта ---------------------------------------------------
-FILES_TO_INSTALL=("kopia_common.sh" "kopia_backup.sh" "kopia_restore_to.sh" "kopia-completion.bash")
-EXECUTABLE_FILES=("kopia_backup.sh" "kopia_restore_to.sh")
-NON_EXECUTABLE_FILES=("kopia_common.sh" "kopia-completion.bash")
+FILES_TO_INSTALL=(
+    "kopia_common.sh" 
+    "kopia_backup.sh" 
+    "kopia_restore_to.sh" 
+    "kopia-completion.bash"
+)
+
+EXECUTABLE_FILES=(
+    "kopia_backup.sh" 
+    "kopia_restore_to.sh"
+)
+
+NON_EXECUTABLE_FILES=(
+    "kopia_common.sh" 
+    "kopia-completion.bash"
+)
 
 
 
@@ -84,6 +97,9 @@ ${APP_NAME} — установка скриптов резервного коп�
   - добавляет строку подключения автодополнения в ~/.bashrc, если её
     там ещё нет (проверяется перед добавлением, повторные запуски
     установки не дублируют строку).
+
+Версия: ${APP_VERSION}
+${COPYRIGHT}
 EOF
 }
 
@@ -119,6 +135,12 @@ done
 # ---- Определение целевой папки установки ------------------------------------
 TARGET_DIR="${1:-}"
 
+# Это паранойя.
+# Если TARGET_DIR содержит " (кавычку), строка сломается при echo в .bashrc 
+if [[ "$TARGET_DIR" == *'"'* ]]; then
+    exit_with_msg "Путь установки содержит кавычку: ${TARGET_DIR}. Это не поддерживается." 1
+fi
+
 if [[ -z "$TARGET_DIR" ]]; then
     echo "Выберите папку установки:"
     echo "  1) /usr/bin/              (требуется root, не рекомендуется)"
@@ -135,6 +157,11 @@ if [[ -z "$TARGET_DIR" ]]; then
         3) TARGET_DIR="${REAL_HOME}/.local/bin" ;;
         *) exit_with_msg "Некорректный выбор: ${CHOICE}" 1 ;;
     esac
+fi
+
+# Проверка пустоты — после меню (защита от ./install.sh "")
+if [[ -z "$TARGET_DIR" ]]; then
+    exit_with_msg "Пустой путь установки." 1
 fi
 
 
@@ -157,6 +184,7 @@ if [[ $MKDIR_STATUS -ne 0 ]] || [[ ! -w "$TARGET_DIR" ]]; then
         # Передаём уже определённый TARGET_DIR явным аргументом, чтобы после
         # перезапуска через sudo не показывать интерактивное меню заново.
         require_root "$TARGET_DIR"
+        
     else
         exit_with_msg "Не удалось создать/получить доступ на запись к папке: ${TARGET_DIR}${MKDIR_ERR:+ (${MKDIR_ERR})}" 1
     fi

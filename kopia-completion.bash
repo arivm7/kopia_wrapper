@@ -1,13 +1,20 @@
 # kopia-completion.bash
 # ------------------------------------------------------------------------------
 # Автодополнение bash для kopia_backup.sh и kopia_restore_to.sh.
-# Дополняет только имена флагов — пути аргументов (ПУТЬ_ВОССТАНОВЛЕНИЯ,
-# ПУТЬ у --info) не подставляются.
+#
+# Дополняет ТОЛЬКО имена флагов. Значения аргументов (пути к репозиторию,
+# каталогу восстановления, файлу пароля и т.д.) не подставляются —
+# после флага, требующего аргумент, работает стандартное дополнение
+# bash по файлам/каталогам.
 #
 # Подключается через `source` (например, из ~/.bashrc). Самостоятельно
 # не запускается и не требует флага исполнения.
+#
+# При добавлении/удалении ключей в скриптах — обновите списки opts ниже.
 # ------------------------------------------------------------------------------
 
+# ---- kopia_backup.sh --------------------------------------------------------
+# Ключи: -h/--help, -u/--usage, -v/--version. Аргументов нет.
 _kopia_backup_complete() {
     local cur opts
     cur="${COMP_WORDS[COMP_CWORD]}"
@@ -15,12 +22,46 @@ _kopia_backup_complete() {
     COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
 }
 
+
+# ---- kopia_restore_to.sh ----------------------------------------------------
+# Ключи:
+#   --help, --version           — без аргументов
+#   --list, --manifest          — без аргументов (действия)
+#   -i, --info                  — с НЕОБЯЗАТЕЛЬНЫМ аргументом (путь)
+#   --repo <путь>               — с аргументом
+#   --to <путь>                 — с аргументом
+#   --password-file <файл>      — с аргументом
+#   --kit <путь>                — с аргументом
+#   --mount <точка>             — с аргументом
+#
+# Все ключи, требующие аргумент, перечислены в opts — compgen будет
+# предлагать их как флаги. Значения аргументов (пути) не подставляются:
+# после того как пользователь ввёл "--repo " (с пробелом), cur станет
+# пустым или начнётся с "/" — ни один флаг не совпадёт, и сработает
+# стандартное дополнение bash по файлам.
+# Поле ключей --repo|--to|--password-file|--kit|--mount|-i|--info работает автодополнение из файловой системы
 _kopia_restore_to_complete() {
-    local cur opts
+    local cur prev opts
     cur="${COMP_WORDS[COMP_CWORD]}"
-    opts="-h --help -u --usage -v --version -i --info"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    opts="--help --version --list --manifest -i --info --repo --to --password-file --kit --mount"
+
+    case "$prev" in
+        --repo|--to|--password-file|--kit|--mount|-i|--info)
+            # После этих ключей ожидается путь/файл — отдаём файловое дополнение
+            COMPREPLY=( $(compgen -f -- "${cur}") )
+            return 0
+            ;;
+    esac
+
     COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
 }
 
-complete -F _kopia_backup_complete kopia_backup.sh
-complete -F _kopia_restore_to_complete kopia_restore_to.sh
+
+
+# ---- Регистрация ------------------------------------------------------------
+# Регистрируем дополнение по именам скриптов (как они вызываются).
+# Если скрипты установлены под другими именами — добавьте соответствующие
+# строки `complete -F ... <имя>`.
+complete -F _kopia_backup_complete kopia_backup.sh kopia_backup
+complete -F _kopia_restore_to_complete kopia_restore_to.sh kopia_restore_to
