@@ -18,15 +18,15 @@
 _kopia_backup_complete() {
     local cur opts
     cur="${COMP_WORDS[COMP_CWORD]}"
-    opts="-H --help -u --usage -V --version -ec --edit_config"
+    opts="-h --help -u --usage -v --version -ec --edit_config"
     COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
 }
 
 
 # ---- kopia_restore_to.sh ----------------------------------------------------
 # Ключи:
-#   -H, --help                  — без аргументов
-#   -V, --version               — без аргументов
+#   -h, --help                  — без аргументов
+#   -v, --version               — без аргументов
 #   --list, --manifest          — без аргументов (действия)
 #   -i, --info                  — с НЕОБЯЗАТЕЛЬНЫМ аргументом (путь)
 #   --repo <путь>               — с аргументом
@@ -45,7 +45,7 @@ _kopia_restore_to_complete() {
     local cur prev opts
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    opts="-H --help -V --version --list --manifest -i|--info --repo --to --password-file --kit --mount -ec --edit_config"
+    opts="-h --help -v --version --list --manifest -i|--info --repo --to --password-file --kit --mount -ec --edit_config"
 
     case "$prev" in
         --repo|--to|--password-file|--kit|--mount|-i|--info)

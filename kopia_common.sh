@@ -17,8 +17,9 @@ set -uo pipefail
 # ---- Версия проекта скриптов -------------------------------------------------
 # Используется ключом -v/--version в kopia_backup.sh и kopia_restore_to.sh.
 # Меняйте при значимых изменениях логики скриптов.
-APP_VERSION="1.1.0 (2026-10-31)"
+APP_VERSION="1.2.0 (2026-11-05)"
 LAST_CHANGES="\
+v1.2.0 (2026-11-05): Добавление постобработки архива после бэкапа (chown/chmod/SGID)
 v1.1.0 (2026-10-31): Добавлено редактирование конфига через ключ -ec/--edit_config в обоих скриптах.
 v1.0.0 (2026-10-30): добавлен restore-kit для восстановления данных из архива на другой машине
                      kopia_restore_to.sh полностью переписан с новым функционалом.
@@ -167,6 +168,39 @@ SOURCE_PATHS=(
 # *.log — исключить все файлы с расширением .log
 # !important.log — исключение из исключения (не игнорировать конкретный файл, даже если он попадает под *.log)
 #
+
+
+
+#
+# ---- Постобработка прав репозитория -----------------------------------------
+# После каждого запуска бэкапа (после maintenance run) можно назначить
+# владельца/группу/права на файлы репозитория. Это нужно, если:
+#   - бэкап работает от root (файлы создаются root:root),
+#   - а читать архив должен другой пользователь (например, user по SSH).
+#
+# POSTPROCESS_ENABLED:
+#   "yes" — выполнять постобработку после каждого запуска
+#   "no"  — не выполнять (по умолчанию: права не трогаем)
+#
+# POSTPROCESS_OWNER:
+#   "user:group" — владелец и группа для всех файлов репозитория.
+#   Пример: "root:user" — владелец root, группа user.
+#   Пустая строка — не менять владельца (только chmod, если задан).
+#
+# POSTPROCESS_CHMOD:
+#   Права для chmod -R. Пример: "g+rwX" — добавить группе чтение/запись/вход.
+#   Пустая строка — не менять права.
+#
+# POSTPROCESS_SGID:
+#   "yes" — установить SGID на все каталоги репозитория (наследование группы
+#           для новых файлов). "no" — не устанавливать.
+#
+POSTPROCESS_ENABLED="no"
+POSTPROCESS_OWNER=""
+POSTPROCESS_CHMOD=""
+POSTPROCESS_SGID="no"
+
+
 
 #
 # Прогамма для редактирования конфига
@@ -686,6 +720,63 @@ EOF
     fi
 
     echo "restore-kit записан: ${kit_dir}"
+}
+
+
+
+# ------------------------------------------------------------------------------
+# postprocess_repo_permissions "<repo_path>"
+#
+#   Постобработка прав репозитория после бэкапа. Выполняется от root
+#   (скрипт уже работает от root после require_root), поэтому sudo не нужен.
+#
+#   Что делает (по переменным из секции CONFIG):
+#     1. Если POSTPROCESS_OWNER не пуст — chown -R <owner> на repo_path.
+#     2. Если POSTPROCESS_CHMOD не пуст — chmod -R <mode> на repo_path.
+#     3. Если POSTPROCESS_SGID="yes" — chmod g+s на все каталоги (find -type d).
+#
+#   Если POSTPROCESS_ENABLED != "yes" — ничего не делает (тихо выходит).
+#
+#   Ошибки любого шага — фатальны (exit 1): если постобработка не удалась,
+#   лучше упасть с понятным сообщением, чем оставить репозиторий с
+#   неверными правами (и обнаружить это при восстановлении).
+# ------------------------------------------------------------------------------
+postprocess_repo_permissions() {
+    local repo_path="${1:?postprocess_repo_permissions: не передан путь к репозиторию}"
+
+    if [[ "${POSTPROCESS_ENABLED:-no}" != "yes" ]]; then
+        return 0
+    fi
+
+    if [[ ! -d "$repo_path" ]]; then
+        exit_with_msg "postprocess: каталог репозитория не найден: ${repo_path}" 1
+    fi
+
+    echo ""
+    echo "Постобработка прав репозитория: ${repo_path}"
+
+    # 1. Смена владельца/группы
+    if [[ -n "${POSTPROCESS_OWNER:-}" ]]; then
+        echo "  chown -R ${POSTPROCESS_OWNER} ${repo_path}"
+        chown -R "$POSTPROCESS_OWNER" "$repo_path" || \
+            exit_with_msg "postprocess: chown -R ${POSTPROCESS_OWNER} ${repo_path} не удался" 1
+    fi
+
+    # 2. Права (chmod -R)
+    if [[ -n "${POSTPROCESS_CHMOD:-}" ]]; then
+        echo "  chmod -R ${POSTPROCESS_CHMOD} ${repo_path}"
+        chmod -R "$POSTPROCESS_CHMOD" "$repo_path" || \
+            exit_with_msg "postprocess: chmod -R ${POSTPROCESS_CHMOD} ${repo_path} не удался" 1
+    fi
+
+    # 3. SGID на каталоги (наследование группы для новых файлов)
+    if [[ "${POSTPROCESS_SGID:-no}" == "yes" ]]; then
+        echo "  find ${repo_path} -type d -exec chmod g+s {} +"
+        find "$repo_path" -type d -exec chmod g+s {} + || \
+            exit_with_msg "postprocess: установка SGID на каталоги ${repo_path} не удалась" 1
+    fi
+
+    echo "Постобработка прав завершена."
 }
 
 
